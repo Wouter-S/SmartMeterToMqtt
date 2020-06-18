@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Hosting;
+using Newtonsoft.Json;
 using RJCP.IO.Ports;
 using System;
 using System.Collections.Generic;
@@ -15,30 +16,31 @@ namespace SmartMeterToMqtt
     public class SmartMeterService : IHostedService
     {
         private static IMqttClient client;
+        private static Settings _settings;
 
-        public async Task StartReading(string smartMeterCommPort, string mqttIp, int mqttPort)
+        public async Task StartReading()
         {
-            Console.WriteLine($"Connecting to Mqtt: {mqttIp}{mqttPort}, com: {smartMeterCommPort}");
-            var configuration = new MqttConfiguration { Port = mqttPort };
+            Console.WriteLine($"Connecting to Mqtt: {JsonConvert.SerializeObject(_settings)}");
+            var configuration = new MqttConfiguration { Port = _settings.MqttPort };
 
-            client = await MqttClient.CreateAsync(mqttIp, configuration);
+            client = await MqttClient.CreateAsync(_settings.MqttIp, configuration);
             await client.ConnectAsync();
             client.Disconnected += async (a, b) => await client.ConnectAsync();
 
             Console.WriteLine("Connected to Mqtt broker");
 
-            SerialPortStream listenerPort = new SerialPortStream(smartMeterCommPort)
+            SerialPortStream listenerPort = new SerialPortStream(_settings.ComPort)
             {
-                BaudRate = 9600,
-                Parity = Parity.Even,
+                BaudRate = _settings.BaudRate,
+                Parity = (Parity)Enum.Parse(typeof(Parity), _settings.Parity),
                 StopBits = StopBits.One,
-                DataBits = 7,
+                DataBits = _settings.DataBits,
                 Handshake = Handshake.None,
                 DtrEnable = true,
                 RtsEnable = true,
                 Encoding = System.Text.Encoding.ASCII,
 
-                ReceivedBytesThreshold = 100,
+                ReceivedBytesThreshold = 1,
             };
 
             if (!listenerPort.IsOpen)
@@ -46,7 +48,7 @@ namespace SmartMeterToMqtt
                 listenerPort.Open();
             }
             listenerPort.DataReceived += async (a, b) => await DataReceivedHandler(a, b);
-            Console.WriteLine($"Started listening on port {smartMeterCommPort}");
+            Console.WriteLine($"Started listening on port {_settings.ComPort}");
         }
 
         private static async Task DataReceivedHandler(object sender, SerialDataReceivedEventArgs e)
@@ -58,8 +60,9 @@ namespace SmartMeterToMqtt
                 while (!indata.Contains("!"))
                 {
                     indata = indata + sp.ReadExisting();
-                    await Task.Delay(25);
+                    await Task.Delay(1);
                 }
+                Console.WriteLine(indata);
 
                 indata = Regex.Replace(indata, @"\r\n?|\n", "");
                 await HandleEnergyReading(indata);
@@ -79,15 +82,19 @@ namespace SmartMeterToMqtt
 
             try
             {
-                decimal powerUsedLowReading = GetSubstring(command, "1-0:1.8.1(", "*");
-                decimal powerUsedHighReading = GetSubstring(command, "1-0:1.8.2(", "*");
+                decimal powerUsedLowReading = GetSubstring(command, "1.8.1(", "*");
+                decimal powerUsedHighReading = GetSubstring(command, "1.8.2(", "*");
 
-                decimal powerBackLowReading = GetSubstring(command, "1-0:2.8.1(", "*");
-                decimal powerBackHighReading = GetSubstring(command, "1-0:2.8.2(", "*");
+                decimal powerBackLowReading = GetSubstring(command, "2.8.1(", "*");
+                decimal powerBackHighReading = GetSubstring(command, "2.8.2(", "*");
 
-                decimal powerCurrentReading = GetSubstring(command, "1-0:1.7.0(", "*") * 1000;
-                decimal gasReading = GetSubstring(command, "(m3)(", ")");
-
+                decimal powerCurrentReading = GetSubstring(command, "1.7.0(", "*") * 1000;
+                decimal gasReading = 0;
+                try
+                {
+                    gasReading = GetSubstring(command, "(m3)(", ")");
+                }
+                catch { }
                 //send MQTT
                 string content = Newtonsoft.Json.JsonConvert.SerializeObject(new EnergyReading
                 {
@@ -99,7 +106,7 @@ namespace SmartMeterToMqtt
                     GasReading = gasReading
                 });
 
-                var message = new MqttApplicationMessage("cramer62/sensors/smartmeter", Encoding.UTF8.GetBytes(content));
+                var message = new MqttApplicationMessage(_settings.PublishTopic, Encoding.UTF8.GetBytes(content));
                 await client.PublishAsync(message, MqttQualityOfService.AtMostOnce);
             }
             catch (Exception e)
@@ -116,13 +123,17 @@ namespace SmartMeterToMqtt
         public async Task StartAsync(CancellationToken cancellationToken)
         {
             var environment = Environment.GetEnvironmentVariables();
-            string comPort = (string)environment["ComPort"];
-            string mqttIp = (string)environment["MqttIp"];
-            int mqttPort = int.Parse((string)environment["MqttPort"]);
+            _settings = new Settings
+            {
+                ComPort = (string)environment["ComPort"],
+                MqttIp = (string)environment["MqttIp"],
+                MqttPort = int.Parse((string)environment["MqttPort"]),
+                PublishTopic = (string)environment["PublishTopic"]
+            };
 
             try
             {
-                await StartReading(comPort, mqttIp, mqttPort);
+                await StartReading();
             }
             catch (Exception e)
             {
@@ -134,15 +145,5 @@ namespace SmartMeterToMqtt
         {
             return Task.CompletedTask;
         }
-    }
-
-    public class EnergyReading
-    {
-        public decimal GasReading { get; internal set; }
-        public decimal PowerCurrent { get; internal set; }
-        public decimal PowerUsedHigh { get; internal set; }
-        public decimal PowerUsedLow { get; internal set; }
-        public decimal PowerBackHigh { get; internal set; }
-        public decimal PowerBackLow { get; internal set; }
     }
 }

@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/dotnet/core/aspnet:3.0-bionic-arm64v8 AS base
+FROM mcr.microsoft.com/dotnet/core/aspnet:3.0-bionic-arm32v7 AS base
 WORKDIR /app
 
 VOLUME /data
